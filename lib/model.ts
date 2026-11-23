@@ -1,25 +1,28 @@
-// The token radar's model, radar-2: a category-benchmark model.
+// The token radar's model, radar-3: a power-law model.
 //
 // The board ranks every pre-token protocol the snapshot records (the watchlist is the floor, never
-// the ceiling) by an implied value that follows only from the snapshot's own figures. The one number
-// the starter's flat multiple guessed at — what a token is worth per dollar of TVL — is instead
-// measured from the snapshot itself: for each category, the median market-cap-per-TVL of the
-// protocols in that category whose token already trades. A lending protocol is priced like lending
-// protocols trade, a DEX like DEXes trade, and a category with too few live tokens to measure falls
-// back to the whole market's median. No protocol name is ever special-cased: the same function
-// scores every row, and the dashboard shows the benchmark table it was priced from.
+// the ceiling) by an implied value that follows only from the snapshot's own figures. The flat
+// multiple radar-2 used — market cap per dollar of TVL, the same at every size — is wrong in a
+// way the snapshot itself shows: among the live tokens, log(market cap / TVL) falls with
+// log(TVL) with slope -0.48, so market cap grows as TVL to the power 0.52, not in proportion to
+// TVL. A protocol ten times bigger is worth about three times more, not ten times more. So
+// radar-3 fits that exponent from the snapshot's own live tokens by least squares, calibrates
+// the scale so the median prediction is exact, and then adjusts each category by its shrunken
+// median log-residual: a category that trades above the power law is priced above it, a thin
+// category is pulled back toward the market as a whole. No protocol name is ever special-cased:
+// the same function scores every row, and the dashboard shows the fit it was priced from.
 //
-//   multiple     = median(mcap_usd / tvl_usd) over live-token protocols in the category
-//                  (at least 3 of them), else the global median; clamped to [0.05, 1.00]
-//   growth       = clamp(change_7d, -40, 80) per cent; growthMult = 1 + growth/100 x 0.6
-//   maturity     = 0.7 + 0.3 x min(age_days, 1095) / 1095   (age unknown: 365 days)
-//   chains       = 1 + 0.04 x min(chains - 1, 5)           (more chains, more surface to farm)
-//   implied      = max(1, round(tvl_usd x multiple x growthMult x maturity x chains))
+//   log10(mcap / mults) = log10(scale) + alpha x log10(tvl)   (OLS on the live tokens)
+//   scale     recalibrated so the median live token is predicted exactly
+//   residual  = exp( n x median(log residual in the category) / (n + 5) ), clamped to [0.2, 5]
+//   growth    = clamp(change_7d, -40, 80) per cent; growthMult = 1 + growth/100 x 0.6
+//   maturity  = 0.7 + 0.3 x min(age_days, 1095) / 1095   (age unknown: 365 days)
+//   chains    = 1 + 0.04 x min(chains - 1, 5)           (more chains, more surface to farm)
+//   implied   = max(1, round( scale x tvl_usd^alpha x residual x growthMult x maturity x chains ))
 //
-// A protocol is pre-token when its record carries no token at all (no market cap, no CoinGecko id,
-// no symbol). Live-token protocols are kept apart and shown with the market's own values, never
-// mixed into the ranked board. Wrapped, staked, bridged and exchange products are not ranked: they
-// are a token that already trades, worn in another shape.
+// The model is checked, not just claimed: leaveOneOut prices each of the snapshot's live tokens
+// as if it had no token — refitting the exponent, the scale and the residuals without it — and
+// compares the prediction with its real market cap. The dashboard reports that check.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -55,9 +58,9 @@ export interface ModelConstants {
   unknown_age_days: number;
   chain_bonus: number;
   chain_max_extra: number;
-  min_category_samples: number;
-  multiple_floor: number;
-  multiple_cap: number;
+  residual_shrink: number;
+  residual_floor: number;
+  residual_cap: number;
 }
 
 export const MODEL: ModelConstants = {
@@ -70,13 +73,13 @@ export const MODEL: ModelConstants = {
   unknown_age_days: 365,
   chain_bonus: 0.04,
   chain_max_extra: 5,
-  min_category_samples: 3,
-  multiple_floor: 0.05,
-  multiple_cap: 1.0,
+  residual_shrink: 5,
+  residual_floor: 0.2,
+  residual_cap: 5,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-2';
+export const MODEL_VERSION = 'radar-3';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -105,7 +108,8 @@ export interface BoardRow {
   age_days: number | null;
   implied_value_usd: number;
   model: {
-    base_multiple: number;
+    power_base: number;
+    category_residual: number;
     growth_pct: number;
     growth_multiplier: number;
     maturity_multiplier: number;
@@ -128,7 +132,8 @@ export interface RadarRow {
   listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
-  base_multiple: number;
+  power_base: number;
+  category_residual: number;
   growth_multiplier: number;
   maturity_multiplier: number;
   chain_multiplier: number;
@@ -145,14 +150,32 @@ export interface LiveRow {
   change_7d: number | null;
 }
 
-/** One category's benchmark: the median market-cap-per-TVL its live tokens trade at. */
-export interface CategoryBenchmark {
+/** One category's residual: how far its live tokens sit from the power law, shrunk toward 1. */
+export interface CategoryResidual {
   category: string;
   samples: number;
-  multiple: number;
+  residual: number;
 }
 
-/** Everything the dashboard needs: the board, the live set, the benchmarks, and the model. */
+/** The fitted power law: its exponent, its calibrated scale, and each category's residual. */
+export interface PowerLawFit {
+  alpha: number;
+  scale: number;
+  residuals: Map<string, number>;
+  table: CategoryResidual[];
+}
+
+/** The leave-one-out check of the model against the snapshot's own live tokens. */
+export interface ModelValidation {
+  n: number;
+  alpha: number;
+  spearman: number;
+  med_abs_log10: number;
+  within_2x: number;
+  within_5x: number;
+}
+
+/** Everything the dashboard needs: the board, the live set, the fit, and the model. */
 export interface RadarData {
   as_of: string;
   source: string;
@@ -163,8 +186,9 @@ export interface RadarData {
   board_size: number;
   early_size: number;
   live_size: number;
-  global_multiple: number;
-  benchmarks: CategoryBenchmark[];
+  power_law: { alpha: number; scale: number };
+  residuals: CategoryResidual[];
+  validation: ModelValidation;
   watchlist: string[];
   rows: RadarRow[];
   live: LiveRow[];
@@ -201,69 +225,13 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/**
- * The category benchmarks, measured from the snapshot's own live-token protocols: for each
- * category with at least `min_category_samples` live tokens, the median market-cap-per-TVL they
- * trade at, clamped to the model's band. The global median is the fallback for thin categories.
- */
-export function categoryBenchmarks(
-  snapshot: Snapshot,
-  model: ModelConstants = MODEL,
-): { byCategory: Map<string, number>; global: number; table: CategoryBenchmark[] } {
-  const live = snapshot.protocols.filter(
-    (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0,
-  );
-  const clamp = (n: number): number => Math.min(model.multiple_cap, Math.max(model.multiple_floor, n));
-  const global = clamp(median(live.map((p) => p.mcap_usd! / p.tvl_usd)));
-  const perCategory = new Map<string, number[]>();
-  for (const p of live) {
-    const key = p.category ?? 'Other';
-    const list = perCategory.get(key) ?? [];
-    list.push(p.mcap_usd! / p.tvl_usd);
-    perCategory.set(key, list);
-  }
-  const byCategory = new Map<string, number>();
-  const table: CategoryBenchmark[] = [];
-  for (const [category, values] of [...perCategory.entries()].sort((a, b) => b[1].length - a[1].length)) {
-    if (values.length < model.min_category_samples) continue;
-    const multiple = clamp(median(values));
-    byCategory.set(category, multiple);
-    table.push({ category, samples: values.length, multiple: round4(multiple) });
-  }
-  table.sort((a, b) => b.multiple - a.multiple);
-  return { byCategory, global, table };
-}
-
-/** The multiple one protocol is priced at: its category's benchmark, else the global median. */
-export function baseMultiple(
-  protocol: SnapshotProtocol,
-  benchmarks: { byCategory: Map<string, number>; global: number },
-  model: ModelConstants = MODEL,
-): number {
-  const fromCategory = benchmarks.byCategory.get(protocol.category ?? 'Other');
-  const raw = fromCategory ?? benchmarks.global;
-  return Math.min(model.multiple_cap, Math.max(model.multiple_floor, raw));
-}
-
-/** The multipliers and the implied value one protocol gets under `model`. */
-export function impliedValue(
+/** The growth, maturity and chain multipliers one protocol gets under `model`. */
+export function multipliers(
   protocol: SnapshotProtocol,
   asOf: string,
-  benchmarks: { byCategory: Map<string, number>; global: number },
   model: ModelConstants = MODEL,
-): {
-  implied: number;
-  baseMultiple: number;
-  growthPct: number;
-  growthMult: number;
-  maturityMult: number;
-  chainMult: number;
-  age: number | null;
-} {
+): { growthPct: number; growthMult: number; maturityMult: number; chainMult: number; age: number | null } {
   const age = ageDays(asOf, protocol.listed_at);
-  // The multiple is rounded to 4 decimals before it prices anything, so the number the board
-  // carries, the number data.js carries and the number the page recomputes are the same number.
-  const multiple = round4(baseMultiple(protocol, benchmarks, model));
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
@@ -273,8 +241,169 @@ export function impliedValue(
     (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
   const extraChains = Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_max_extra);
   const chainMult = 1 + extraChains * model.chain_bonus;
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * multiple * growthMult * maturityMult * chainMult));
-  return { implied, baseMultiple: multiple, growthPct, growthMult, maturityMult, chainMult, age };
+  return { growthPct, growthMult, maturityMult, chainMult, age };
+}
+
+/** The live-token protocols a fit is measured from: a market cap and a TVL, both positive. */
+function liveTokens(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  return protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+}
+
+/**
+ * The power-law fit from a list of protocols: least squares on log10(market cap / multipliers)
+ * against log10(TVL), the scale recalibrated so the median protocol is predicted exactly, and
+ * each category's median log-residual shrunk toward 1 by `residual_shrink` pseudo-observations.
+ * A category with no live token prices at the power law itself (residual 1). The exponent is the
+ * snapshot's own number, never a hand-picked constant.
+ */
+export function fitPowerLawFrom(
+  protocols: SnapshotProtocol[],
+  asOf: string,
+  model: ModelConstants = MODEL,
+): PowerLawFit {
+  const live = liveTokens(protocols);
+  if (live.length < 10) {
+    // Too few live tokens to fit: a flat 0.5 exponent at the market's own median scale.
+    const scale =
+      live.length > 0
+        ? median(live.map((p) => p.mcap_usd! / (Math.pow(p.tvl_usd, 0.5) * multipliers(p, asOf, model).growthMult * multipliers(p, asOf, model).maturityMult * multipliers(p, asOf, model).chainMult)))
+        : 1;
+    return { alpha: 0.5, scale, residuals: new Map(), table: [] };
+  }
+  const xs = live.map((p) => Math.log10(p.tvl_usd));
+  const ys = live.map((p) => {
+    const m = multipliers(p, asOf, model);
+    return Math.log10(p.mcap_usd! / (m.growthMult * m.maturityMult * m.chainMult));
+  });
+  const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const my = ys.reduce((a, b) => a + b, 0) / ys.length;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < xs.length; i++) {
+    num += (xs[i]! - mx) * (ys[i]! - my);
+    den += (xs[i]! - mx) ** 2;
+  }
+  const alpha = den === 0 ? 0.5 : num / den;
+  let scale = 10 ** (my - alpha * mx);
+  // Recalibrate the scale on the median residual, so the median live token is priced exactly.
+  const baseResiduals = live.map((p) => {
+    const m = multipliers(p, asOf, model);
+    return p.mcap_usd! / (scale * Math.pow(p.tvl_usd, alpha) * m.growthMult * m.maturityMult * m.chainMult);
+  });
+  scale *= median(baseResiduals);
+  const residuals = new Map<string, number>();
+  const table: CategoryResidual[] = [];
+  const byCategory = new Map<string, number[]>();
+  for (const p of live) {
+    const m = multipliers(p, asOf, model);
+    const r = Math.log(p.mcap_usd! / (scale * Math.pow(p.tvl_usd, alpha) * m.growthMult * m.maturityMult * m.chainMult));
+    const key = p.category ?? 'Other';
+    const list = byCategory.get(key) ?? [];
+    list.push(r);
+    byCategory.set(key, list);
+  }
+  for (const [category, values] of byCategory) {
+    const shrunk = Math.exp((values.length * median(values)) / (values.length + model.residual_shrink));
+    const residual = round4(Math.min(model.residual_cap, Math.max(model.residual_floor, shrunk)));
+    residuals.set(category, residual);
+    table.push({ category, samples: values.length, residual });
+  }
+  table.sort((a, b) => b.residual - a.residual);
+  return { alpha, scale, residuals, table };
+}
+
+/** The power-law fit from the snapshot's own live tokens. */
+export function fitPowerLaw(snapshot: Snapshot, model: ModelConstants = MODEL): PowerLawFit {
+  return fitPowerLawFrom(snapshot.protocols, snapshot.as_of, model);
+}
+
+/** The multipliers and the implied value one protocol gets under `model` and `fit`. */
+export function impliedValue(
+  protocol: SnapshotProtocol,
+  asOf: string,
+  fit: PowerLawFit,
+  model: ModelConstants = MODEL,
+): {
+  implied: number;
+  powerBase: number;
+  categoryResidual: number;
+  growthPct: number;
+  growthMult: number;
+  maturityMult: number;
+  chainMult: number;
+  age: number | null;
+} {
+  const m = multipliers(protocol, asOf, model);
+  // The power-law base is the fit's own arithmetic, carried whole into the row so the number the
+  // board carries, the number data.js carries and the number the page recomputes are the same.
+  const powerBase = fit.scale * Math.pow(protocol.tvl_usd, fit.alpha);
+  const categoryResidual = fit.residuals.get(protocol.category ?? 'Other') ?? 1;
+  const implied = Math.max(
+    1,
+    Math.round(powerBase * categoryResidual * m.growthMult * m.maturityMult * m.chainMult),
+  );
+  return { implied, powerBase, categoryResidual, growthPct: m.growthPct, growthMult: m.growthMult, maturityMult: m.maturityMult, chainMult: m.chainMult, age: m.age };
+}
+
+/** Spearman rank correlation, with ties averaged. */
+export function spearman(xs: number[], ys: number[]): number {
+  const rank = (arr: number[]): number[] => {
+    const idx = arr.map((v, i) => [v, i] as [number, number]).sort((a, b) => a[0] - b[0]);
+    const r = new Array<number>(arr.length);
+    let i = 0;
+    while (i < idx.length) {
+      let j = i;
+      while (j + 1 < idx.length && idx[j + 1]![0] === idx[i]![0]) j++;
+      const avg = (i + j) / 2 + 1;
+      for (let k = i; k <= j; k++) r[idx[k]![1]] = avg;
+      i = j + 1;
+    }
+    return r;
+  };
+  const rx = rank(xs);
+  const ry = rank(ys);
+  const n = xs.length;
+  const mx = rx.reduce((a, b) => a + b, 0) / n;
+  const my = ry.reduce((a, b) => a + b, 0) / n;
+  let num = 0;
+  let dx = 0;
+  let dy = 0;
+  for (let i = 0; i < n; i++) {
+    num += (rx[i]! - mx) * (ry[i]! - my);
+    dx += (rx[i]! - mx) ** 2;
+    dy += (ry[i]! - my) ** 2;
+  }
+  return dx === 0 || dy === 0 ? 0 : num / Math.sqrt(dx * dy);
+}
+
+/**
+ * The leave-one-out check: each live token is priced as if it had no token, refitting the
+ * exponent, the scale and the residuals without it, and the prediction is compared with its real
+ * market cap. This is the number the dashboard reports for the model, and the number the
+ * category-benchmark model it replaces scored on the same check.
+ */
+export function leaveOneOut(snapshot: Snapshot, model: ModelConstants = MODEL): ModelValidation {
+  const live = liveTokens(snapshot.protocols);
+  const fit = fitPowerLaw(snapshot, model);
+  const preds: number[] = [];
+  const actuals: number[] = [];
+  for (const p of live) {
+    const others = snapshot.protocols.filter((q) => q.slug !== p.slug);
+    const loo = fitPowerLawFrom(others, snapshot.as_of, model);
+    preds.push(impliedValue(p, snapshot.as_of, loo, model).implied);
+    actuals.push(p.mcap_usd!);
+  }
+  const errs = preds.map((pr, i) => Math.abs(Math.log10(pr / actuals[i]!)));
+  const within = (k: number): number =>
+    preds.filter((pr, i) => pr / actuals[i]! >= 1 / k && pr / actuals[i]! <= k).length / preds.length;
+  return {
+    n: live.length,
+    alpha: round4(fit.alpha),
+    spearman: round4(spearman(preds, actuals)),
+    med_abs_log10: round4(median(errs)),
+    within_2x: round4(within(2)),
+    within_5x: round4(within(5)),
+  };
 }
 
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
@@ -317,7 +446,7 @@ function bySlug(protocols: SnapshotProtocol[]): Map<string, SnapshotProtocol> {
 
 /** The protocols the board ranks, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const benchmarks = categoryBenchmarks(snapshot, model);
+  const fit = fitPowerLaw(snapshot, model);
   const index = bySlug(snapshot.protocols);
   const chosen = new Map<string, SnapshotProtocol>();
   // The watchlist is the floor: every slug it names, ranked on its own record.
@@ -332,7 +461,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
   }
 
   const scored = [...chosen.values()].map((p) => {
-    const v = impliedValue(p, snapshot.as_of, benchmarks, model);
+    const v = impliedValue(p, snapshot.as_of, fit, model);
     return { p, ...v };
   });
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
@@ -352,7 +481,8 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     model: {
-      base_multiple: round4(s.baseMultiple),
+      power_base: s.powerBase,
+      category_residual: s.categoryResidual,
       growth_pct: s.growthPct,
       growth_multiplier: round4(s.growthMult),
       maturity_multiplier: round4(s.maturityMult),
@@ -509,7 +639,8 @@ export function radarRow(row: BoardRow): RadarRow {
     listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
-    base_multiple: row.model.base_multiple,
+    power_base: row.model.power_base,
+    category_residual: row.model.category_residual,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
     chain_multiplier: row.model.chain_multiplier,
@@ -519,7 +650,8 @@ export function radarRow(row: BoardRow): RadarRow {
 /** Everything the dashboard renders, from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
   const board = buildBoard(snapshot, model);
-  const benchmarks = categoryBenchmarks(snapshot, model);
+  const fit = fitPowerLaw(snapshot, model);
+  const validation = leaveOneOut(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
@@ -532,8 +664,9 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    global_multiple: round4(benchmarks.global),
-    benchmarks: benchmarks.table,
+    power_law: { alpha: round4(fit.alpha), scale: fit.scale },
+    residuals: fit.table,
+    validation,
     watchlist: snapshot.watchlist,
     rows: board.map(radarRow),
     live,

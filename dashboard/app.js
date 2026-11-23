@@ -1,4 +1,4 @@
-// Token Radar, radar-2 dashboard. It reads window.RADAR (written beside dashboard/ by
+// Token Radar, radar-3 dashboard. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail drawer with
 // the model's own inputs and the protocol's farm plan, and a sandbox that re-ranks the board
 // live under different model weights. No network: every byte it shows is in data.js.
@@ -40,8 +40,9 @@
   }
   function fmtMult(n) { return (Math.round(n * 10000) / 10000).toFixed(4).replace(/0+$/, '').replace(/\.$/, '.0'); }
 
-  // impliedOf: the radar-2 model in the page. base_multiple is the category benchmark the
-  // model measured from live tokens; the sandbox may move the three weights below it.
+  // impliedOf: the radar-3 model in the page. power_base is scale x TVL^alpha, fitted from
+  // the snapshot's own live tokens; category_residual is the category's shrunken adjustment
+  // to that power law. The sandbox may move the three weights below them.
   function impliedOf(row, sb) {
     var m = sb || state.sb;
     var growth = Math.min(DATA.model.growth_cap, Math.max(DATA.model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
@@ -50,7 +51,7 @@
     var maturity = m.maturity + (Math.min(Math.max(age, 0), DATA.model.maturity_days) / DATA.model.maturity_days) * (1 - m.maturity);
     var extra = Math.min(Math.max((row.chains || []).length - 1, 0), DATA.model.chain_max_extra);
     var chainMult = 1 + extra * m.chain;
-    return Math.max(1, Math.round(row.tvl_usd * row.base_multiple * growthMult * maturity * chainMult));
+    return Math.max(1, Math.round(row.power_base * row.category_residual * growthMult * maturity * chainMult));
   }
   function breakdownOf(row, sb) {
     var m = sb || state.sb;
@@ -58,6 +59,8 @@
     var age = row.age_days === null || row.age_days === undefined ? DATA.model.unknown_age_days : row.age_days;
     var extra = Math.min(Math.max((row.chains || []).length - 1, 0), DATA.model.chain_max_extra);
     return {
+      powerBase: row.power_base,
+      residual: row.category_residual,
       growthPct: growth,
       growthMult: 1 + (growth / 100) * m.growth,
       maturityMult: m.maturity + (Math.min(Math.max(age, 0), DATA.model.maturity_days) / DATA.model.maturity_days) * (1 - m.maturity),
@@ -215,7 +218,7 @@
       el('div', { class: 'top-meta' },
         el('span', { html: 'Snapshot <b>' + DATA.as_of + '</b>' }),
         el('span', { text: 'DefiLlama protocol index' }),
-        el('span', { html: 'Model <b>' + DATA.model_version + '</b> · category benchmarks' })
+        el('span', { html: 'Model <b>' + DATA.model_version + '</b> · power law, fitted live' })
       )
     );
   }
@@ -358,7 +361,7 @@
     return el('div', { class: 'panel' },
       el('div', { class: 'table-wrap' },
         el('table', null,
-          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking — and they are the benchmark the pre-token rows are priced from.' }),
+          el('caption', { class: 'sub', text: 'Token live: these protocols already trade, so their market cap is a fact, not a model. They are set aside from the pre-token ranking — and they are the fit the pre-token rows are priced from.' }),
           el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Status' }), el('th', { scope: 'col', text: 'Protocol' }), el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: '7d' }), el('th', { scope: 'col', text: 'Market cap' }), el('th', { scope: 'col', text: 'Mcap / TVL' }), el('th', { scope: 'col', text: 'Token' }))),
           tbody
         )
@@ -368,13 +371,16 @@
 
   function modelPanel() {
     var m = DATA.model;
+    var pl = DATA.power_law;
+    var v = DATA.validation;
     return el('section', { class: 'panel section' },
       el('h2', null, 'How implied value is computed ', el('span', { text: 'model ' + DATA.model_version + ' — one function, every row' })),
-      el('p', { class: 'sub', text: 'The multiple is not a guess: for each category it is the median market-cap-per-TVL of that category\u2019s tokens that already trade, measured from this snapshot. A category with fewer than ' + m.min_category_samples + ' live tokens uses the whole market\u2019s median, ' + fmtMult(DATA.global_multiple) + 'x. No protocol name is special-cased, and no row is hand-picked.' }),
-      el('div', { class: 'formula', html: 'implied = round( tvl_usd x <b>multiple</b> x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x <b>' + m.growth_weight + '</b>) x (<b>' + m.maturity_floor + '</b> + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.chain_max_extra + ') x <b>' + m.chain_bonus + '</b>) )' }),
-      el('div', { class: 'bench' }, (DATA.benchmarks || []).map(function (b) {
-        return el('div', null, el('span', { text: b.category + ' · n=' + b.samples }), el('b', { text: fmtMult(b.multiple) + 'x' }));
+      el('p', { class: 'sub', text: 'The value is not a guess and not a flat multiple: the snapshot\u2019s own live tokens say market cap grows as TVL to the power ' + pl.alpha.toFixed(2) + ', not in proportion to TVL — a protocol ten times bigger is worth about three times more, not ten times more. The exponent and the scale are fitted from the ' + v.n + ' live tokens in this snapshot, then each category is adjusted by its own shrunken residual: a category that trades above the power law is priced above it, a thin category is pulled back toward the market. No protocol name is special-cased, and no row is hand-picked.' }),
+      el('div', { class: 'formula', html: 'implied = round( <b>' + pl.scale.toFixed(1) + '</b> x tvl_usd<sup><b>' + pl.alpha.toFixed(2) + '</b></sup> x <b>category residual</b> x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x <b>' + m.growth_weight + '</b>) x (<b>' + m.maturity_floor + '</b> + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') x (1 + min(chains - 1, ' + m.chain_max_extra + ') x <b>' + m.chain_bonus + '</b>) )' }),
+      el('div', { class: 'bench' }, (DATA.residuals || []).map(function (b) {
+        return el('div', null, el('span', { text: b.category + ' · n=' + b.samples }), el('b', { text: fmtMult(b.residual) + 'x' }));
       })),
+      el('p', { class: 'sub', text: 'Checked, not claimed: each of the ' + v.n + ' live tokens is priced as if it had no token — the exponent, the scale and the residuals refitted without it — and the prediction is compared with its real market cap. Rank correlation ' + v.spearman.toFixed(2) + ', median error ' + v.med_abs_log10.toFixed(2) + ' orders of magnitude, ' + Math.round(v.within_2x * 100) + '% within 2x and ' + Math.round(v.within_5x * 100) + '% within 5x of the true value.' }),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Wrapped, staked, bridged and exchange products are not ranked: they are a token that already trades, worn in another shape.' })
     );
   }
@@ -386,7 +392,7 @@
       input.addEventListener('input', function () { out.textContent = input.value; oninput(Number(input.value)); render(); });
       return el('div', { class: 'field' }, el('label', { for: id, text: label }), input, out);
     }
-    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-2 defaults', onclick: function () {
+    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-3 defaults', onclick: function () {
       state.sb = { growth: DATA.model.growth_weight, maturity: DATA.model.maturity_floor, chain: DATA.model.chain_bonus };
       render();
     } });
@@ -397,7 +403,7 @@
         slider('sb-maturity', 'Maturity floor (the value of age with no token)', 0.4, 0.9, 0.05, state.sb.maturity, function (v) { state.sb.maturity = v; }),
         slider('sb-chain', 'Chain bonus per extra chain', 0, 0.1, 0.01, state.sb.chain, function (v) { state.sb.chain = v; })
       ),
-      el('p', { class: 'sandbox-note', text: 'The sandbox is a what-if: it re-ranks the page only. board.json keeps the radar-2 defaults, so the board the gate reads never moves under the reader.' }),
+      el('p', { class: 'sandbox-note', text: 'The sandbox is a what-if: it re-ranks the page only. board.json keeps the radar-3 defaults, so the board the gate reads never moves under the reader.' }),
       el('div', null, reset)
     );
   }
@@ -430,7 +436,8 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Category multiple (' + (row.category || 'Other') + ')' }), el('b', { class: 'num', text: fmtMult(row.base_multiple) + 'x' })),
+        el('div', null, el('span', { text: 'Power-law base (scale x TVL^' + DATA.power_law.alpha.toFixed(2) + ')' }), el('b', { class: 'num', text: fmtUsd(b.powerBase) })),
+        el('div', null, el('span', { text: 'Category residual (' + (row.category || 'Other') + ')' }), el('b', { class: 'num', text: fmtMult(b.residual) + 'x' })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: fmtMult(b.growthMult) + 'x' })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
@@ -462,7 +469,7 @@
   function footer() {
     return el('footer', { class: 'foot' },
       el('span', { html: '<b>Source:</b> ' + DATA.source }),
-      el('span', { html: '<b>Method:</b> radar-2 category-benchmark model. Implied value is this entry\u2019s own claim, never make.fun\u2019s, and never a prediction that a token is issued.' }),
+      el('span', { html: '<b>Method:</b> radar-3 power-law model. Implied value is this entry\u2019s own claim, never make.fun\u2019s, and never a prediction that a token is issued.' }),
       el('span', { text: 'Built for make.fun\u2019s token-radar-01 bounty. The winning dashboard is featured on make.fun\u2019s site and in its posts.' })
     );
   }
