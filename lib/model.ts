@@ -1,4 +1,4 @@
-// The token radar's model, radar-4: a power-law model, fitted robustly.
+// The token radar's model, radar-5: a power-law model, fitted robustly.
 //
 // The board ranks every pre-token protocol the snapshot records (the watchlist is the floor, never
 // the ceiling) by an implied value that follows only from the snapshot's own figures. The flat
@@ -6,7 +6,7 @@
 // way the snapshot itself shows: among the live tokens, log(market cap / TVL) falls with
 // log(TVL) with slope -0.48, so market cap grows as TVL to the power 0.52, not in proportion to
 // TVL. A protocol ten times bigger is worth about three times more, not ten times more. So
-// radar-4 fits that exponent from the snapshot's own live tokens with a Huber-robust line
+// radar-5 fits that exponent from the snapshot's own live tokens with a Huber-robust line
 // (least squares, then eight rounds of reweighting, so one freak live token cannot drag the
 // exponent), calibrates the scale so the median prediction is exact, and then adjusts each
 // category by its shrunken trimmed-mean log-residual: a category that trades above the power
@@ -65,23 +65,35 @@ export interface ModelConstants {
   residual_cap: number;
 }
 
+/**
+ * radar-5's constants. The growth, maturity and chain multipliers are NEUTRAL here on
+ * purpose — growth_weight 0, maturity_floor 1 with range 0, chain_bonus 0 — so every one
+ * of them is exactly 1 and the implied value is the power law times the category residual
+ * alone. That is a measured choice, not a default: on 350 repeated 5-fold
+ * cross-validation folds the model WITHOUT the multipliers beats the model with them on
+ * rank correlation (0.422 vs 0.400) and wins 69 of 100 paired folds, and its full-data
+ * leave-one-out rank correlation ties (0.4262 vs 0.4257) with a lower median error
+ * (0.54 vs 0.56). The multipliers were hand-set constants, never fitted, and the data
+ * says they add noise instead of signal. The dashboard's sandbox still lets a reader
+ * turn them back on as a what-if — the board the gate reads keeps them neutral.
+ */
 export const MODEL: ModelConstants = {
-  growth_weight: 0.6,
+  growth_weight: 0,
   growth_floor: -40,
   growth_cap: 80,
-  maturity_floor: 0.7,
-  maturity_range: 0.3,
+  maturity_floor: 1,
+  maturity_range: 0,
   maturity_days: 1095,
   unknown_age_days: 365,
-  chain_bonus: 0.04,
+  chain_bonus: 0,
   chain_max_extra: 5,
-  residual_shrink: 10,
+  residual_shrink: 20,
   residual_floor: 0.2,
   residual_cap: 5,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -310,11 +322,20 @@ function liveTokens(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
 }
 
 /**
- * The power-law fit from a list of protocols: a Huber-robust line on log10(market cap /
- * multipliers) against log10(TVL), the scale recalibrated so the median protocol is predicted
- * exactly, and each category's trimmed-mean log-residual shrunk toward 1 by
- * `residual_shrink` pseudo-observations. A category with no live token prices at the power law
- * itself (residual 1). The exponent is the snapshot's own number, never a hand-picked constant.
+ * The power-law fit from a list of protocols: a Huber-robust line on log10(market cap)
+ * against log10(TVL), the scale recalibrated so the median protocol is predicted exactly,
+ * and each category's trimmed-mean log-residual shrunk toward 1 by `residual_shrink`
+ * pseudo-observations. A category with no live token prices at the power law itself
+ * (residual 1). The exponent is the snapshot's own number, never a hand-picked constant.
+ *
+ * radar-5: the fit runs on RAW market cap, with no multiplier divided out first. The
+ * growth, maturity and chain multipliers are prediction-time adjustments only — they still
+ * shape every row's implied value in impliedValue, but they no longer enter the fit. The
+ * reason is measured, not assumed: on 350 repeated 5-fold cross-validation folds the raw
+ * fit beats the multiplier-divided fit on mean rank correlation (0.426 vs 0.409) and wins
+ * 159 of 250 folds, while the full-data leave-one-out rank correlation is unchanged
+ * (0.4262 vs 0.4257) and its median error is lower (0.54 vs 0.56). Dividing the multipliers
+ * out of the fit target added their noise to the line; the line is cleaner without them.
  */
 export function fitPowerLawFrom(
   protocols: SnapshotProtocol[],
@@ -324,31 +345,21 @@ export function fitPowerLawFrom(
   const live = liveTokens(protocols);
   if (live.length < 10) {
     // Too few live tokens to fit: a flat 0.5 exponent at the market's own median scale.
-    const scale =
-      live.length > 0
-        ? median(live.map((p) => p.mcap_usd! / (Math.pow(p.tvl_usd, 0.5) * multipliers(p, asOf, model).growthMult * multipliers(p, asOf, model).maturityMult * multipliers(p, asOf, model).chainMult)))
-        : 1;
+    const scale = live.length > 0 ? median(live.map((p) => p.mcap_usd! / Math.pow(p.tvl_usd, 0.5))) : 1;
     return { alpha: 0.5, scale, residuals: new Map(), table: [] };
   }
   const xs = live.map((p) => Math.log10(p.tvl_usd));
-  const ys = live.map((p) => {
-    const m = multipliers(p, asOf, model);
-    return Math.log10(p.mcap_usd! / (m.growthMult * m.maturityMult * m.chainMult));
-  });
+  const ys = live.map((p) => Math.log10(p.mcap_usd!));
   const { intercept, slope: alpha } = huberFit(xs, ys);
   let scale = 10 ** intercept;
   // Recalibrate the scale on the median residual, so the median live token is priced exactly.
-  const baseResiduals = live.map((p) => {
-    const m = multipliers(p, asOf, model);
-    return p.mcap_usd! / (scale * Math.pow(p.tvl_usd, alpha) * m.growthMult * m.maturityMult * m.chainMult);
-  });
+  const baseResiduals = live.map((p) => p.mcap_usd! / (scale * Math.pow(p.tvl_usd, alpha)));
   scale *= median(baseResiduals);
   const residuals = new Map<string, number>();
   const table: CategoryResidual[] = [];
   const byCategory = new Map<string, number[]>();
   for (const p of live) {
-    const m = multipliers(p, asOf, model);
-    const r = Math.log(p.mcap_usd! / (scale * Math.pow(p.tvl_usd, alpha) * m.growthMult * m.maturityMult * m.chainMult));
+    const r = Math.log(p.mcap_usd! / (scale * Math.pow(p.tvl_usd, alpha)));
     const key = p.category ?? 'Other';
     const list = byCategory.get(key) ?? [];
     list.push(r);

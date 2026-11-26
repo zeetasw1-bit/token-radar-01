@@ -1,4 +1,4 @@
-// Token Radar, radar-4: snapshot in, ranked board and dashboard out.
+// Token Radar, radar-5: snapshot in, ranked board and dashboard out.
 //
 // The sealed snapshot comes from /input/snapshot.json (or --input <file|dir>). Every
 // pre-token protocol is scored with the power-law model in lib/model.ts; the ranked board
