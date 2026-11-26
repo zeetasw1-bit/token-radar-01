@@ -1,4 +1,4 @@
-// The token radar's model, radar-3: a power-law model.
+// The token radar's model, radar-4: a power-law model, fitted robustly.
 //
 // The board ranks every pre-token protocol the snapshot records (the watchlist is the floor, never
 // the ceiling) by an implied value that follows only from the snapshot's own figures. The flat
@@ -6,15 +6,17 @@
 // way the snapshot itself shows: among the live tokens, log(market cap / TVL) falls with
 // log(TVL) with slope -0.48, so market cap grows as TVL to the power 0.52, not in proportion to
 // TVL. A protocol ten times bigger is worth about three times more, not ten times more. So
-// radar-3 fits that exponent from the snapshot's own live tokens by least squares, calibrates
-// the scale so the median prediction is exact, and then adjusts each category by its shrunken
-// median log-residual: a category that trades above the power law is priced above it, a thin
-// category is pulled back toward the market as a whole. No protocol name is ever special-cased:
-// the same function scores every row, and the dashboard shows the fit it was priced from.
+// radar-4 fits that exponent from the snapshot's own live tokens with a Huber-robust line
+// (least squares, then eight rounds of reweighting, so one freak live token cannot drag the
+// exponent), calibrates the scale so the median prediction is exact, and then adjusts each
+// category by its shrunken trimmed-mean log-residual: a category that trades above the power
+// law is priced above it, a thin category is pulled back toward the market as a whole. No
+// protocol name is ever special-cased: the same function scores every row, and the dashboard
+// shows the fit it was priced from.
 //
-//   log10(mcap / mults) = log10(scale) + alpha x log10(tvl)   (OLS on the live tokens)
+//   log10(mcap / mults) = log10(scale) + alpha x log10(tvl)   (Huber-robust line on the live tokens)
 //   scale     recalibrated so the median live token is predicted exactly
-//   residual  = exp( n x median(log residual in the category) / (n + 5) ), clamped to [0.2, 5]
+//   residual  = exp( n x trimmed-mean(log residual in the category) / (n + 10) ), clamped to [0.2, 5]
 //   growth    = clamp(change_7d, -40, 80) per cent; growthMult = 1 + growth/100 x 0.6
 //   maturity  = 0.7 + 0.3 x min(age_days, 1095) / 1095   (age unknown: 365 days)
 //   chains    = 1 + 0.04 x min(chains - 1, 5)           (more chains, more surface to farm)
@@ -73,13 +75,13 @@ export const MODEL: ModelConstants = {
   unknown_age_days: 365,
   chain_bonus: 0.04,
   chain_max_extra: 5,
-  residual_shrink: 5,
+  residual_shrink: 10,
   residual_floor: 0.2,
   residual_cap: 5,
 };
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -216,6 +218,58 @@ export function median(values: number[]): number {
   return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
 }
 
+/** The trimmed mean: the mean after dropping the lowest and highest quarters. */
+export function trimmedMean(values: number[], fraction = 0.25): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const cut = Math.floor(sorted.length * fraction);
+  const kept = cut === 0 ? sorted : sorted.slice(cut, sorted.length - cut);
+  return kept.reduce((a, b) => a + b, 0) / kept.length;
+}
+
+/** Ordinary least squares for y = intercept + slope x. */
+function olsFit(xs: number[], ys: number[]): { intercept: number; slope: number } {
+  const n = xs.length;
+  const mx = xs.reduce((a, b) => a + b, 0) / n;
+  const my = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (xs[i]! - mx) * (ys[i]! - my);
+    den += (xs[i]! - mx) ** 2;
+  }
+  const slope = den === 0 ? 0.5 : num / den;
+  return { intercept: my - slope * mx, slope };
+}
+
+/**
+ * A robust line through log-log points: least squares, then eight rounds of Huber
+ * reweighting (k = 1.345 x MAD-based sigma), so one freak live token cannot drag the
+ * exponent. Returns { intercept, slope } for y = intercept + slope x.
+ */
+export function huberFit(xs: number[], ys: number[]): { intercept: number; slope: number } {
+  let { intercept, slope } = olsFit(xs, ys);
+  for (let round = 0; round < 8; round++) {
+    const residuals = xs.map((x, i) => ys[i]! - (intercept + slope * x));
+    const centre = median(residuals);
+    const mad = median(residuals.map((r) => Math.abs(r - centre)));
+    const sigma = 1.4826 * mad || 1e-9;
+    const k = 1.345 * sigma;
+    const weights = residuals.map((r) => (Math.abs(r) <= k ? 1 : k / Math.abs(r)));
+    const sw = weights.reduce((a, b) => a + b, 0);
+    const mx = xs.reduce((sum, x, i) => sum + weights[i]! * x, 0) / sw;
+    const my = ys.reduce((sum, y, i) => sum + weights[i]! * y, 0) / sw;
+    let num = 0;
+    let den = 0;
+    for (let i = 0; i < xs.length; i++) {
+      num += weights[i]! * (xs[i]! - mx) * (ys[i]! - my);
+      den += weights[i]! * (xs[i]! - mx) ** 2;
+    }
+    slope = den === 0 ? slope : num / den;
+    intercept = my - slope * mx;
+  }
+  return { intercept, slope };
+}
+
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
@@ -250,11 +304,11 @@ function liveTokens(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
 }
 
 /**
- * The power-law fit from a list of protocols: least squares on log10(market cap / multipliers)
- * against log10(TVL), the scale recalibrated so the median protocol is predicted exactly, and
- * each category's median log-residual shrunk toward 1 by `residual_shrink` pseudo-observations.
- * A category with no live token prices at the power law itself (residual 1). The exponent is the
- * snapshot's own number, never a hand-picked constant.
+ * The power-law fit from a list of protocols: a Huber-robust line on log10(market cap /
+ * multipliers) against log10(TVL), the scale recalibrated so the median protocol is predicted
+ * exactly, and each category's trimmed-mean log-residual shrunk toward 1 by
+ * `residual_shrink` pseudo-observations. A category with no live token prices at the power law
+ * itself (residual 1). The exponent is the snapshot's own number, never a hand-picked constant.
  */
 export function fitPowerLawFrom(
   protocols: SnapshotProtocol[],
@@ -275,16 +329,8 @@ export function fitPowerLawFrom(
     const m = multipliers(p, asOf, model);
     return Math.log10(p.mcap_usd! / (m.growthMult * m.maturityMult * m.chainMult));
   });
-  const mx = xs.reduce((a, b) => a + b, 0) / xs.length;
-  const my = ys.reduce((a, b) => a + b, 0) / ys.length;
-  let num = 0;
-  let den = 0;
-  for (let i = 0; i < xs.length; i++) {
-    num += (xs[i]! - mx) * (ys[i]! - my);
-    den += (xs[i]! - mx) ** 2;
-  }
-  const alpha = den === 0 ? 0.5 : num / den;
-  let scale = 10 ** (my - alpha * mx);
+  const { intercept, slope: alpha } = huberFit(xs, ys);
+  let scale = 10 ** intercept;
   // Recalibrate the scale on the median residual, so the median live token is priced exactly.
   const baseResiduals = live.map((p) => {
     const m = multipliers(p, asOf, model);
@@ -303,7 +349,7 @@ export function fitPowerLawFrom(
     byCategory.set(key, list);
   }
   for (const [category, values] of byCategory) {
-    const shrunk = Math.exp((values.length * median(values)) / (values.length + model.residual_shrink));
+    const shrunk = Math.exp((values.length * trimmedMean(values)) / (values.length + model.residual_shrink));
     const residual = round4(Math.min(model.residual_cap, Math.max(model.residual_floor, shrunk)));
     residuals.set(category, residual);
     table.push({ category, samples: values.length, residual });

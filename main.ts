@@ -1,4 +1,4 @@
-// Token Radar, radar-3: the entrypoint (Node 22, standard library only).
+// Token Radar, radar-4: the entrypoint (Node 22, standard library only).
 //
 // Reads the sealed snapshot from /input/snapshot.json (or --input <file|dir>), scores every
 // pre-token protocol with the power-law model in lib/model.ts, writes the ranked board

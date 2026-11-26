@@ -1,4 +1,4 @@
-// Token Radar, radar-3 dashboard. It reads window.RADAR (written beside dashboard/ by
+// Token Radar, radar-4 dashboard. It reads window.RADAR (written beside dashboard/ by
 // main.ts) and renders the ranked board, a filterable table, a per-protocol detail drawer with
 // the model's own inputs and the protocol's farm plan, and a sandbox that re-ranks the board
 // live under different model weights. No network: every byte it shows is in data.js.
@@ -40,7 +40,7 @@
   }
   function fmtMult(n) { return (Math.round(n * 10000) / 10000).toFixed(4).replace(/0+$/, '').replace(/\.$/, '.0'); }
 
-  // impliedOf: the radar-3 model in the page. power_base is scale x TVL^alpha, fitted from
+  // impliedOf: the radar-4 model in the page. power_base is scale x TVL^alpha, fitted from
   // the snapshot's own live tokens; category_residual is the category's shrunken adjustment
   // to that power law. The sandbox may move the three weights below them.
   function impliedOf(row, sb) {
@@ -392,7 +392,7 @@
       input.addEventListener('input', function () { out.textContent = input.value; oninput(Number(input.value)); render(); });
       return el('div', { class: 'field' }, el('label', { for: id, text: label }), input, out);
     }
-    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-3 defaults', onclick: function () {
+    var reset = el('button', { class: 'button ghost', type: 'button', text: 'Reset to radar-4 defaults', onclick: function () {
       state.sb = { growth: DATA.model.growth_weight, maturity: DATA.model.maturity_floor, chain: DATA.model.chain_bonus };
       render();
     } });
@@ -403,7 +403,7 @@
         slider('sb-maturity', 'Maturity floor (the value of age with no token)', 0.4, 0.9, 0.05, state.sb.maturity, function (v) { state.sb.maturity = v; }),
         slider('sb-chain', 'Chain bonus per extra chain', 0, 0.1, 0.01, state.sb.chain, function (v) { state.sb.chain = v; })
       ),
-      el('p', { class: 'sandbox-note', text: 'The sandbox is a what-if: it re-ranks the page only. board.json keeps the radar-3 defaults, so the board the gate reads never moves under the reader.' }),
+      el('p', { class: 'sandbox-note', text: 'The sandbox is a what-if: it re-ranks the page only. board.json keeps the radar-4 defaults, so the board the gate reads never moves under the reader.' }),
       el('div', null, reset)
     );
   }
@@ -469,7 +469,7 @@
   function footer() {
     return el('footer', { class: 'foot' },
       el('span', { html: '<b>Source:</b> ' + DATA.source }),
-      el('span', { html: '<b>Method:</b> radar-3 power-law model. Implied value is this entry\u2019s own claim, never make.fun\u2019s, and never a prediction that a token is issued.' }),
+      el('span', { html: '<b>Method:</b> radar-4 power-law model. Implied value is this entry\u2019s own claim, never make.fun\u2019s, and never a prediction that a token is issued.' }),
       el('span', { text: 'Built for make.fun\u2019s token-radar-01 bounty. The winning dashboard is featured on make.fun\u2019s site and in its posts.' })
     );
   }
