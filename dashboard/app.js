@@ -11,34 +11,43 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
+  var defaults = { growth: DATA.model.growth_weight, maturity: DATA.model.maturity_floor, chain: DATA.model.chain_bonus };
   var state = {
     q: '', category: 'all', chain: 'all', minTvl: 0, tab: 'pre-token',
     sort: 'implied', dir: -1, selected: null, watchlistOnly: false,
-    sb: { growth: DATA.model.growth_weight, maturity: DATA.model.maturity_floor, chain: DATA.model.chain_bonus }
+    sb: { growth: defaults.growth, maturity: defaults.maturity, chain: defaults.chain }
   };
   var WATCHLIST = {};
   // The watchlist is the floor: rows whose slug the snapshot's watchlist names. data.js carries
   // the set, so the page marks a row as watchlist from the snapshot's own list, not from a rank.
-  (DATA.watchlist || []).forEach(function (s) { WATCHLIST[s] = true; });
+  (DATA.watchlist || []).forEach(function (slug) { WATCHLIST[slug] = true; });
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
-  function fmtUsd(n) {
-    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
-    if (Math.abs(n) >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
-    if (Math.abs(n) >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
-    if (Math.abs(n) >= 1e3) return '$' + Math.round(n / 1e3) + 'K';
-    return usd.format(n);
+  function fmtUsd(value) {
+    if (value === null || value === undefined || !isFinite(value)) return 'n/a';
+    var mag = Math.abs(value);
+    if (mag >= 1e9) return '$' + (value / 1e9).toFixed(2) + 'B';
+    if (mag >= 1e6) return '$' + (value / 1e6).toFixed(1) + 'M';
+    if (mag >= 1e3) return '$' + Math.round(value / 1e3) + 'K';
+    return usd.format(value);
   }
-  function fmtPct(n) {
-    if (n === null || n === undefined || !isFinite(n)) return 'n/a';
-    return (n > 0 ? '+' : '') + n.toFixed(2) + '%';
+  function fmtPct(value) {
+    if (value === null || value === undefined || !isFinite(value)) return 'n/a';
+    var sign = value > 0 ? '+' : '';
+    return sign + value.toFixed(2) + '%';
   }
   function fmtAge(days) {
     if (days === null || days === undefined) return 'unknown';
     if (days >= 365) return (days / 365).toFixed(1) + 'y';
     return Math.max(0, Math.round(days)) + 'd';
   }
-  function fmtMult(n) { return (Math.round(n * 10000) / 10000).toFixed(4).replace(/0+$/, '').replace(/\.$/, '.0'); }
+  function fmtMult(value) {
+    var rounded = Math.round(value * 10000) / 10000;
+    var text = rounded.toFixed(4);
+    text = text.replace(/0+$/, '');
+    if (text.endsWith('.')) text += '0';
+    return text;
+  }
 
   // impliedOf: the radar-4 model in the page. power_base is scale x TVL^alpha, fitted from
   // the snapshot's own live tokens; category_residual is the category's shrunken adjustment
@@ -227,34 +236,36 @@
   }
 
   function header() {
-    return el('header', { class: 'top' },
-      el('div', { class: 'brand' },
-        el('span', { class: 'sweep', 'aria-hidden': 'true' }),
-        el('span', { class: 'brand-name', html: 'Token <em>Radar</em>' })
-      ),
-      el('div', { class: 'top-meta' },
-        el('span', { html: 'Snapshot <b>' + DATA.as_of + '</b>' }),
-        el('span', { text: 'DefiLlama protocol index' }),
-        el('span', { html: 'Model <b>' + DATA.model_version + '</b> · power law, fitted live' })
-      )
+    var brand = el('div', { class: 'brand' },
+      el('span', { class: 'sweep', 'aria-hidden': 'true' }),
+      el('span', { class: 'brand-name', html: 'Token <em>Radar</em>' })
     );
+    var meta = el('div', { class: 'top-meta' },
+      el('span', { html: 'Snapshot <b>' + DATA.as_of + '</b>' }),
+      el('span', { text: 'DefiLlama protocol index' }),
+      el('span', { html: 'Model <b>' + DATA.model_version + '</b> · power law, fitted live' })
+    );
+    return el('header', { class: 'top' }, brand, meta);
+  }
+
+  function factBox(label, value) {
+    return el('div', { class: 'fact' }, el('span', { text: label }), el('b', { text: value }));
   }
 
   function lede() {
     var total = DATA.rows.reduce(function (s, r) { return s + r.implied_value_usd; }, 0);
     var top = DATA.rows[0];
-    return el('section', { class: 'lede' },
-      el('div', null,
-        el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { html: 'The watchlist is the floor: every protocol with at least <b>$' + Math.round(DATA.floor_usd / 1e6) + 'M</b> of TVL and no token on record. The early radar adds <b>' + DATA.early_size + '</b> pre-token protocols below that floor — the whole pre-token universe this snapshot records. Implied value is a model, not a promise, and never a prediction that a token comes.' })
-      ),
-      el('div', { class: 'facts' },
-        el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
-        el('div', { class: 'fact' }, el('span', { text: 'Pre-token rows scored' }), el('b', { text: String(DATA.board_size) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Board implied value' }), el('b', { text: fmtUsd(total) })),
-        el('div', { class: 'fact' }, el('span', { text: 'Top of the board' }), el('b', { text: top ? top.name : '—' }))
-      )
+    var intro = el('div', null,
+      el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
+      el('p', { html: 'The watchlist is the floor: every protocol with at least <b>$' + Math.round(DATA.floor_usd / 1e6) + 'M</b> of TVL and no token on record. The early radar adds <b>' + DATA.early_size + '</b> pre-token protocols below that floor — the whole pre-token universe this snapshot records. Implied value is a model, not a promise, and never a prediction that a token comes.' })
     );
+    var facts = el('div', { class: 'facts' },
+      factBox('Watchlist covered', DATA.watchlist_size + ' / ' + DATA.watchlist_size),
+      factBox('Pre-token rows scored', String(DATA.board_size)),
+      factBox('Board implied value', fmtUsd(total)),
+      factBox('Top of the board', top ? top.name : '—')
+    );
+    return el('section', { class: 'lede' }, intro, facts);
   }
 
   function optionList(id, label, options, current, onchange) {
@@ -292,12 +303,14 @@
   }
 
   function sortHeader(key, label) {
-    return el('th', { scope: 'col' },
-      el('button', { type: 'button', onclick: function () { if (state.sort === key) state.dir = -state.dir; else { state.sort = key; state.dir = -1; } render(); } },
-        label,
-        state.sort === key ? el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' }) : null
-      )
-    );
+    var arrow = null;
+    if (state.sort === key) arrow = el('span', { 'aria-hidden': 'true', text: state.dir < 0 ? ' v' : ' ^' });
+    var button = el('button', { type: 'button', onclick: function () {
+      if (state.sort === key) state.dir = -state.dir;
+      else { state.sort = key; state.dir = -1; }
+      render();
+    } }, label, arrow);
+    return el('th', { scope: 'col' }, button);
   }
 
   function boardRow(r, max, active) {
