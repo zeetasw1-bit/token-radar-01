@@ -208,22 +208,24 @@ const DAY_MS = 86_400_000;
 
 /** A finite number, else `fallback`. */
 function finite(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  return fallback;
 }
 
 /** The median of a non-empty list of numbers. */
 export function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  const ordered = [...values].sort((a, b) => a - b);
+  const half = Math.floor(ordered.length / 2);
+  if (ordered.length % 2 === 1) return ordered[half]!;
+  return (ordered[half - 1]! + ordered[half]!) / 2;
 }
 
 /** The trimmed mean: the mean after dropping the lowest and highest quarters. */
 export function trimmedMean(values: number[], fraction = 0.25): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const cut = Math.floor(sorted.length * fraction);
-  const kept = cut === 0 ? sorted : sorted.slice(cut, sorted.length - cut);
-  return kept.reduce((a, b) => a + b, 0) / kept.length;
+  const ordered = [...values].sort((a, b) => a - b);
+  const drop = Math.floor(ordered.length * fraction);
+  const middle = drop === 0 ? ordered : ordered.slice(drop, ordered.length - drop);
+  return middle.reduce((a, b) => a + b, 0) / middle.length;
 }
 
 /** Ordinary least squares for y = intercept + slope x. */
@@ -233,10 +235,12 @@ function olsFit(xs: number[], ys: number[]): { intercept: number; slope: number 
   const my = ys.reduce((a, b) => a + b, 0) / n;
   let num = 0;
   let den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (xs[i]! - mx) * (ys[i]! - my);
-    den += (xs[i]! - mx) ** 2;
-  }
+  xs.forEach((x, i) => {
+    const dx = x - mx;
+    const dy = ys[i]! - my;
+    num += dx * dy;
+    den += dx * dx;
+  });
   const slope = den === 0 ? 0.5 : num / den;
   return { intercept: my - slope * mx, slope };
 }
@@ -273,10 +277,10 @@ export function huberFit(xs: number[], ys: number[]): { intercept: number; slope
 /** A whole day count from `from` to `to`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
-  const a = Date.parse(`${asOf}T00:00:00Z`);
-  const b = Date.parse(`${listedAt}T00:00:00Z`);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  return Math.max(0, Math.floor((a - b) / DAY_MS));
+  const asOfMs = Date.parse(`${asOf}T00:00:00Z`);
+  const listedMs = Date.parse(`${listedAt}T00:00:00Z`);
+  if (!Number.isFinite(asOfMs) || !Number.isFinite(listedMs)) return null;
+  return Math.max(0, Math.floor((asOfMs - listedMs) / DAY_MS));
 }
 
 /** The growth, maturity and chain multipliers one protocol gets under `model`. */
@@ -289,12 +293,11 @@ export function multipliers(
   const rawGrowth = finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageForModel = age ?? model.unknown_age_days;
-  const maturityMult =
-    model.maturity_floor +
-    (Math.min(Math.max(ageForModel, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const extraChains = Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_max_extra);
-  const chainMult = 1 + extraChains * model.chain_bonus;
+  const effectiveAge = age ?? model.unknown_age_days;
+  const cappedAge = Math.min(Math.max(effectiveAge, 0), model.maturity_days);
+  const maturityMult = model.maturity_floor + (cappedAge / model.maturity_days) * model.maturity_range;
+  const extra = Math.min(Math.max(protocol.chains.length - 1, 0), model.chain_max_extra);
+  const chainMult = 1 + extra * model.chain_bonus;
   return { growthPct, growthMult, maturityMult, chainMult, age };
 }
 
