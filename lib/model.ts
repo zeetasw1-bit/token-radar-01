@@ -303,7 +303,10 @@ export function multipliers(
 
 /** The live-token protocols a fit is measured from: a market cap and a TVL, both positive. */
 function liveTokens(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
-  return protocols.filter((p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+  return protocols.filter((p) => {
+    if (p.mcap_usd === null || p.mcap_usd <= 0) return false;
+    return p.tvl_usd > 0;
+  });
 }
 
 /**
@@ -363,7 +366,8 @@ export function fitPowerLawFrom(
 
 /** The power-law fit from the snapshot's own live tokens. */
 export function fitPowerLaw(snapshot: Snapshot, model: ModelConstants = MODEL): PowerLawFit {
-  return fitPowerLawFrom(snapshot.protocols, snapshot.as_of, model);
+  const fit = fitPowerLawFrom(snapshot.protocols, snapshot.as_of, model);
+  return fit;
 }
 
 /** The multipliers and the implied value one protocol gets under `model` and `fit`. */
@@ -387,11 +391,18 @@ export function impliedValue(
   // board carries, the number data.js carries and the number the page recomputes are the same.
   const powerBase = fit.scale * Math.pow(protocol.tvl_usd, fit.alpha);
   const categoryResidual = fit.residuals.get(protocol.category ?? 'Other') ?? 1;
-  const implied = Math.max(
-    1,
-    Math.round(powerBase * categoryResidual * m.growthMult * m.maturityMult * m.chainMult),
-  );
-  return { implied, powerBase, categoryResidual, growthPct: m.growthPct, growthMult: m.growthMult, maturityMult: m.maturityMult, chainMult: m.chainMult, age: m.age };
+  const raw = powerBase * categoryResidual * m.growthMult * m.maturityMult * m.chainMult;
+  const implied = Math.max(1, Math.round(raw));
+  return {
+    implied,
+    powerBase,
+    categoryResidual,
+    growthPct: m.growthPct,
+    growthMult: m.growthMult,
+    maturityMult: m.maturityMult,
+    chainMult: m.chainMult,
+    age: m.age,
+  };
 }
 
 /** Spearman rank correlation, with ties averaged. */
